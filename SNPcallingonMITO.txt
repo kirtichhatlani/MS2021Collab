@@ -1,0 +1,67 @@
+###### indexing ref genome #####
+
+bwa index filtered_hg38-chrM.fa
+
+###### mapping 2 reads with ref genome #####
+
+bwa mem -R '@RG\tID:foo\tSM:bar\tLB:library1' filtered_hg38-chrM.fa Read1.fq  Read2.fq > sample.sam
+
+###### sam to bam #####
+
+samtools fixmate -O bam sample.sam sample_fixmate.bam
+
+##### sorting bam file #####
+
+mkdir tmp
+cd tmp
+mkdir sample_temp
+samtools sort -O bam -o sample_sorted.bam -T /tmp/sample_temp sample_fixmate.bam
+
+##### indexing bam file #####
+
+samtools index sample_sorted.bam
+
+##### gatk needs a ref.dict and ref.fa.fai files to run #####
+
+gatk CreateSequenceDictionary -R filtered_hg38-chrM.fa
+
+##### MUTECT command #####
+
+gatk Mutect2 -R filtered_hg38-chrM.fa -I sample_sorted.bam --germline-resource af-only-gnomad.hg38.vcf.gz --panel-of-normals 1000g_pon.hg38.vcf.gz -O sample.vcf.gz
+
+##### vcf annotation of rsIDS ######
+
+gunzip sample.vcf.gz
+sed 's/chrM/MT/g' sample.vcf > sampleMT.vcf
+bgzip sampleMT.vcf
+bcftools index sampleMT.vcf.gz
+bcftools annotate -a dbsnpfromNCBI.vcf.gz -c ID sampleMT.vcf.gz > sample_rsIDs.vcf.gz
+
+##### Filteration of AD% using pandas #####
+
+bcftools query -f '%CHROM\t%POS\t%ID\t%REF\t%ALT\t%AS_SB_TABLE\t%DP\t%ECNT\t%MBQ\t%MFRL\t%MMQ\t%MPOS\t%PON\t%POPAF\t%TLOD\t[%GT]\t[%AD]\t[%AF]\t[%DP]\t[%F1R2]\t[%F2R1]\t[%GQ]\t[%PGT]\t[%PID]\t[%PL]\t[%PS]\t[%SB]\n' sample_rsIDs.vcf > sample_temp.tsv
+sed '1iChr\tPOS\tID\tREF\tALT\tAS_SB_TABLE\tDP\tECNT\tMBQ\tMFRL\tMMQ\tMPOS\tPON\tPOPAF\tTLOD\t[GT]\t[AD]\t[AF]\t[DP]\t[F1R2]\t[F2R1]\t[GQ]\t[PGT]\t[PID]\t[PL]\t[PS]\t[SB]' sample_temp.tsv > sample.tsv
+python
+import pandas
+vc=pandas.read_csv('sample.tsv', sep = '\t')
+vc[['[AD REF]','[AD ALT1]','[AD ALT2]']] = vc['[AD]'].str.split(',', expand=True)
+vc['[AD ALT2]'].replace({None:0}, inplace=True)
+vc = vc.astype({'[AD ALT2]': int, '[AD REF]': int, '[AD ALT1]': int})
+vc['[Sum of AD]']=vc['[AD REF]']+vc['[AD ALT1]'] + vc['[AD ALT2]']
+vc['[Divide_of_ALT1]']=vc['[AD ALT1]'] / vc['[Sum of AD]']
+vc['%_ALT1']=vc['[Divide_of_ALT1]']*100
+vc['[Divide_of_ALT2]']=vc['[AD ALT2]'] / vc['[Sum of AD]']
+vc['%_ALT2']=vc['[Divide_of_ALT2]']*100
+del vc['[Divide_of_ALT2]']
+del vc['[Divide_of_ALT1]']
+vc_filtered = vc[vc['%_ALT1'] > 1] ####if you want filter the AD% less than 1 
+vc_filtered.to_csv('sample_filtered.tsv', sep='\t', index=False)
+
+##### Getting consensus regions ####
+cat filtered_hg38-chrM.fa | bcftools consensus sample.vcf.gz > sample.fa
+bedtools getfasta -fi sample.fa -bed test.bed -fo sample_ND6.fa
+
+### The test.bed files contains the chr, start, stop of the gene for which you want the consensus of (tab separated) ###
+
+chrM	14461	15040
+
